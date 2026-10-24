@@ -29,13 +29,13 @@ const types=['NPC1','NPC2','NPC3','NPC4'];
 let city=null,sizes={},screen='boot',started=false,paused=false,chosenAvatar='NPC1';
 let player={x:1170,y:1170+44,name:'Dante',city:'MiniRP',avatar:'NPC1',dir:'S',anim:0,moving:false,energy:100,cash:500,time:12*60};
 let camera={x:player.x,y:player.y,scale:1.2},screenSize={w:1280,h:720,dpr:1};
-let keyset=new Set(),joy={x:0,y:0},running=false,frame=0,last=0,lastMini=0,lastSave=0;
+let keyset=new Set(),joy={x:0,y:0},running=false,frame=0,last=0,lastMini=0,lastSave=0,lastPaint=0;
 const patterns=new Map();
 function pattern(path){if(patterns.has(path))return patterns.get(path);const im=image(path);if(!im)return null;const p=ctx.createPattern(im,'repeat');patterns.set(path,p);return p}
 function fillPattern(path,x,y,w,h,fallback){ctx.fillStyle=pattern(path)||fallback;ctx.fillRect(x,y,w,h)}
 function showScreen(which){screen=which;for(const id of ['boot','menu','create'])$('#'+id).classList.toggle('hidden',id!==which);$('#hud').classList.toggle('hidden',which!=='game');if(which!=='game')$('#pause-dialog').classList.add('hidden')}
 function notify(s){const el=$('#toast');el.textContent=s;el.classList.add('visible');clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove('visible'),3400)}
-function resize(){let dpr=Math.min(devicePixelRatio||1,1.6);screenSize={w:window.innerWidth,h:window.innerHeight,dpr};canvas.width=Math.max(1,Math.round(screenSize.w*dpr));canvas.height=Math.max(1,Math.round(screenSize.h*dpr));canvas.style.width=screenSize.w+'px';canvas.style.height=screenSize.h+'px';ctx.setTransform(dpr,0,0,dpr,0,0);ctx.imageSmoothingEnabled=true}
+function resize(){const mobile=window.innerWidth<=850||matchMedia('(pointer: coarse)').matches;let dpr=Math.min(window.devicePixelRatio||1,mobile?1:1.25);screenSize={w:window.innerWidth,h:window.innerHeight,dpr};canvas.width=Math.max(1,Math.round(screenSize.w*dpr));canvas.height=Math.max(1,Math.round(screenSize.h*dpr));canvas.style.width=screenSize.w+'px';canvas.style.height=screenSize.h+'px';ctx.setTransform(dpr,0,0,dpr,0,0);ctx.imageSmoothingEnabled=true}
 function saveGame(silent=false){if(!started)return;const data={...player,version:1};try{localStorage.setItem(SAVE_KEY,JSON.stringify(data));if(!silent)notify('Progresso salvo neste dispositivo.')}catch(e){if(!silent)notify('Não foi possível salvar neste navegador.')}$('#continue-game').disabled=false}
 function loadSave(){try{const v=JSON.parse(localStorage.getItem(SAVE_KEY)||'null');return v&&v.version===1&&Number.isFinite(v.x)&&Number.isFinite(v.y)?v:null}catch(e){return null}}
 function begin(saved){if(saved){player={...player,...saved};}else{
@@ -86,55 +86,91 @@ function update(dt){if(screen!=='game'||paused)return;const p=player;
   if(!car.braking){car.position+=car.speed*dt*car.direction;if(car.position>WORLD_SIZE-80)car.position=80;if(car.position<80)car.position=WORLD_SIZE-80}
  }
  camera.x+=(p.x-camera.x)*Math.min(1,dt*6);camera.y+=(p.y-camera.y)*Math.min(1,dt*6);
- $('#energy').style.width=p.energy.toFixed(0)+'%';$('#cash').textContent='R$ '+p.cash.toLocaleString('pt-BR');$('#clock').textContent=String(Math.floor(p.time/60)).padStart(2,'0')+':'+String(Math.floor(p.time%60)).padStart(2,'0');$('#zone').textContent=zoneAt(p.x,p.y).toUpperCase();
+ const eText=p.energy.toFixed(0)+'%',cashText='R$ '+p.cash.toLocaleString('pt-BR'),timeText=String(Math.floor(p.time/60)).padStart(2,'0')+':'+String(Math.floor(p.time%60)).padStart(2,'0'),zoneText=zoneAt(p.x,p.y).toUpperCase();
+ if($('#energy').style.width!==eText)$('#energy').style.width=eText;
+ if($('#cash').textContent!==cashText)$('#cash').textContent=cashText;
+ if($('#clock').textContent!==timeText)$('#clock').textContent=timeText;
+ if($('#zone').textContent!==zoneText)$('#zone').textContent=zoneText;
  lastSave+=dt;if(lastSave>18){lastSave=0;saveGame(true)}
 }
 function inView(x,y,pad=150){const halfW=screenSize.w/(camera.scale*2),halfH=screenSize.h/(camera.scale*2);return x>camera.x-halfW-pad&&x<camera.x+halfW+pad&&y>camera.y-halfH-pad&&y<camera.y+halfH+pad}
-function fillGround(){
- // Entire layout is authored independently from the CAPX, in predictable 780px city cells.
- ctx.fillStyle=pattern('assets/asphalt.webp')||'#303039';ctx.fillRect(0,0,WORLD_SIZE,WORLD_SIZE);
- for(const block of city.blocks){if(!inView(block.x+CELL/2,block.y+CELL/2,620))continue;
- const x=block.x+STREET/2,y=block.y+STREET/2,s=CELL-STREET;
- fillPattern('assets/pavement.webp',x,y,s,s,'#777571');
- ctx.lineWidth=7;ctx.strokeStyle='#c9c8c4';ctx.strokeRect(x+2,y+2,s-4,s-4);
- ctx.lineWidth=3;ctx.strokeStyle='#535450';ctx.strokeRect(x+9,y+9,s-18,s-18);
- const inside=x+40,iy=y+40,size=s-80;
+// O terreno é estático: cria cada quarteirão uma única vez e reutiliza a imagem.
+// Canvas de 780 × 780 por setor, com cache LRU limitado (evita renderizar ruas a cada frame).
+const terrainCache=new Map();
+function paintPattern(g,path,x,y,w,h,fallback){
+ const im=image(path);
+ g.fillStyle=im?g.createPattern(im,'repeat'):fallback;
+ g.fillRect(x,y,w,h);
+}
+function paintCrosswalk(g,x,y){
+ // Travessias em torno de cada cruzamento, com marcas na orientação da via.
+ // Faixas em zebra, orientadas conforme o sentido real de cada via.
+ g.fillStyle='rgba(245,244,232,.92)';
+ const offset=STREET/2+91;
+ for(let k=-3;k<=3;k++){
+  const d=k*17;
+  g.fillRect(x+offset+d,y-55,10,110);
+  g.fillRect(x-offset+d,y-55,10,110);
+  g.fillRect(x-55,y+offset+d,110,10);
+  g.fillRect(x-55,y-offset+d,110,10);
+ }
+}
+function buildTerrainChunk(block){
+ const tile=document.createElement('canvas');tile.width=tile.height=CELL;
+ const g=tile.getContext('2d',{alpha:false});
+ // A transformação mantém as texturas alinhadas entre os setores.
+ g.translate(-block.x,-block.y);
+ const x=block.x,y=block.y;
+ paintPattern(g,'assets/asphalt.webp',x,y,CELL,CELL,'#303039');
+ const insideX=x+STREET/2,insideY=y+STREET/2,s=CELL-STREET;
+ paintPattern(g,'assets/pavement.webp',insideX,insideY,s,s,'#777571');
+ g.lineWidth=7;g.strokeStyle='#c9c8c4';g.strokeRect(insideX+2,insideY+2,s-4,s-4);
+ g.lineWidth=3;g.strokeStyle='#535450';g.strokeRect(insideX+9,insideY+9,s-18,s-18);
+ const inside=insideX+40,iy=insideY+40,size=s-80;
  if(block.kind==='park'){
-  fillPattern('assets/grass.webp',inside,iy,size,size,'#377d3c');
-  ctx.fillStyle='#d3c7b0';ctx.fillRect(inside,block.y+CELL/2-19,size,38);ctx.fillRect(block.x+CELL/2-19,iy,38,size);
-  ctx.strokeStyle='#eee2ca';ctx.lineWidth=2;ctx.strokeRect(inside,iy,size,size);
-  ctx.fillStyle='#65a5a9';ctx.beginPath();ctx.arc(block.x+CELL/2,block.y+CELL/2,27,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#e4dbc6';ctx.lineWidth=6;ctx.stroke();
+  paintPattern(g,'assets/grass.webp',inside,iy,size,size,'#377d3c');
+  g.fillStyle='#d3c7b0';g.fillRect(inside,y+CELL/2-19,size,38);g.fillRect(x+CELL/2-19,iy,38,size);
+  g.strokeStyle='#eee2ca';g.lineWidth=2;g.strokeRect(inside,iy,size,size);
+  g.fillStyle='#65a5a9';g.beginPath();g.arc(x+CELL/2,y+CELL/2,27,0,Math.PI*2);g.fill();g.strokeStyle='#e4dbc6';g.lineWidth=6;g.stroke();
  }else if(block.kind==='plaza'){
-  fillPattern('assets/stone.webp',inside,iy,size,size,'#bbb1a5');ctx.fillStyle='#a3bdb0';ctx.fillRect(inside+34,iy+34,145,145);ctx.fillRect(inside+size-179,iy+34,145,145);ctx.fillRect(inside+34,iy+size-179,145,145);ctx.fillRect(inside+size-179,iy+size-179,145,145);
-  ctx.fillStyle='#628caa';ctx.beginPath();ctx.arc(block.x+CELL/2,block.y+CELL/2,60,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#eff1e7';ctx.lineWidth=11;ctx.stroke();
+  paintPattern(g,'assets/stone.webp',inside,iy,size,size,'#bbb1a5');
+  g.fillStyle='#a3bdb0';g.fillRect(inside+34,iy+34,145,145);g.fillRect(inside+size-179,iy+34,145,145);
+  g.fillRect(inside+34,iy+size-179,145,145);g.fillRect(inside+size-179,iy+size-179,145,145);
+  g.fillStyle='#628caa';g.beginPath();g.arc(x+CELL/2,y+CELL/2,60,0,Math.PI*2);g.fill();g.strokeStyle='#eff1e7';g.lineWidth=11;g.stroke();
  }else{
-  fillPattern(block.kind==='industrial'?'assets/concrete.webp':'assets/grass.webp',inside,iy,size,size,block.kind==='industrial'?'#aaa5a0':'#397a43');
+  paintPattern(g,block.kind==='industrial'?'assets/concrete.webp':'assets/grass.webp',inside,iy,size,size,block.kind==='industrial'?'#aaa5a0':'#397a43');
   for(let gx=0;gx<2;gx++)for(let gy=0;gy<2;gy++){
-   const xx=block.x+CELL*(gx?0.695:0.305),yy=block.y+CELL*(gy?0.696:0.305);
-   const lotw=266,loth=266;
-   fillPattern(block.kind==='industrial'?'assets/concrete.webp':'assets/pavement.webp',xx-lotw/2,yy-loth/2,lotw,loth,block.kind==='industrial'?'#999':'#a49e93');
-   ctx.strokeStyle='rgba(22,26,28,.23)';ctx.lineWidth=3;ctx.strokeRect(xx-lotw/2,yy-loth/2,lotw,loth);
-   // Pedestrian access to storefronts.
-   ctx.fillStyle='#c2c0b9';ctx.fillRect(xx-15,yy+lotw*.41,30,40);
+   const xx=x+CELL*(gx?0.695:0.305),yy=y+CELL*(gy?0.696:0.305),lotw=266;
+   paintPattern(g,block.kind==='industrial'?'assets/concrete.webp':'assets/pavement.webp',xx-lotw/2,yy-lotw/2,lotw,lotw,block.kind==='industrial'?'#999':'#a49e93');
+   g.strokeStyle='rgba(22,26,28,.23)';g.lineWidth=3;g.strokeRect(xx-lotw/2,yy-lotw/2,lotw,lotw);
+   g.fillStyle='#c2c0b9';g.fillRect(xx-15,yy+lotw*.41,30,40);
   }
  }
+ g.strokeStyle='#cfcac1';g.lineWidth=3;g.setLineDash([37,36]);
+ g.beginPath();g.moveTo(x,y);g.lineTo(x,y+CELL);g.stroke();
+ g.beginPath();g.moveTo(x,y);g.lineTo(x+CELL,y);g.stroke();
+ g.setLineDash([]);
+ // 4 vértices para manter marcas inteiras apesar dos limites entre chunks.
+ for(let a=0;a<=1;a++)for(let b=0;b<=1;b++)paintCrosswalk(g,x+a*CELL,y+b*CELL);
+ return tile;
+}
+function getTerrainChunk(block){
+ const key=block.row*GRID+block.col;
+ if(terrainCache.has(key)){
+  const c=terrainCache.get(key);terrainCache.delete(key);terrainCache.set(key,c);return c;
  }
- // New hand-made lanes: double carriageway markings, junction crosswalks.
- ctx.lineWidth=3;ctx.strokeStyle='#cfcac1';ctx.setLineDash([37,36]);
- for(let i=0;i<=GRID;i++){
-  const pos=i*CELL;if(!inView(pos,camera.y,WORLD_SIZE))continue;
-  ctx.beginPath();ctx.moveTo(pos,0);ctx.lineTo(pos,WORLD_SIZE);ctx.stroke();
- }
- for(let i=0;i<=GRID;i++){const pos=i*CELL;ctx.beginPath();ctx.moveTo(0,pos);ctx.lineTo(WORLD_SIZE,pos);ctx.stroke()}
- ctx.setLineDash([]);
- // zebra crossings before each intersection (draw only nearby)
- ctx.fillStyle='rgba(245,244,232,.88)';
- for(let i=0;i<=GRID;i++)for(let j=0;j<=GRID;j++){
-  const cx=i*CELL,cy=j*CELL;if(!inView(cx,cy,250))continue;
-  for(let k=-3;k<=3;k++){
-   ctx.fillRect(cx+100+k*15,cy-44,9,88);
-   ctx.fillRect(cx-44,cy+100+k*15,88,9);
-  }
+ const c=buildTerrainChunk(block);terrainCache.set(key,c);
+ const limit=window.innerWidth<=850?6:9;
+ while(terrainCache.size>limit){const oldest=terrainCache.keys().next().value;terrainCache.delete(oldest)}
+ return c;
+}
+function fillGround(){
+ // Somente quarteirões visíveis são desenhados. Nenhum piso recalculado a cada frame.
+ const halfW=screenSize.w/(camera.scale*2),halfH=screenSize.h/(camera.scale*2);
+ const x0=camera.x-halfW,y0=camera.y-halfH,x1=camera.x+halfW,y1=camera.y+halfH;
+ for(const block of city.blocks){
+  if(block.x>x1||block.x+CELL<x0||block.y>y1||block.y+CELL<y0)continue;
+  ctx.drawImage(getTerrainChunk(block),block.x,block.y);
  }
 }
 function drawImageSprite(path,x,y,w,h){const im=image(path);if(!im)return;ctx.drawImage(im,x-w/2,y-h/2,w,h)}
@@ -157,8 +193,8 @@ function renderWorld(){let {w,h,dpr}=screenSize;ctx.setTransform(dpr,0,0,dpr,0,0
   }else if(layer.kind==='tree')drawImageSprite(`assets/trees/${String(o.frame).padStart(2,'0')}.webp`,o.x,o.y,76*o.scale,93*o.scale);
   else if(layer.kind==='prop')drawImageSprite(`assets/props/${String(o.frame).padStart(2,'0')}.webp`,o.x,o.y,72*o.scale,44*o.scale);
   else if(layer.kind==='npc'||layer.kind==='player'){
-   const im=actorImage(layer.kind==='player'?{...o,kind:o.avatar}:o);
-   if(im){const hh=layer.kind==='player'?66:53,ww=layer.kind==='player'?40:35;ctx.drawImage(im,o.x-ww/2,o.y-hh/2,ww,hh)}
+   const im=actorImage(o);
+   if(im){const hh=layer.kind==='player'?45:36,ww=layer.kind==='player'?28:24;ctx.drawImage(im,o.x-ww/2,o.y-hh/2,ww,hh)}
   }else if(layer.kind==='car'){
    const x=o.axis==='x'?o.position:o.lane,y=o.axis==='x'?o.lane:o.position;
    const im=image(`assets/cars/${String(o.frame).padStart(2,'0')}.webp`);
@@ -168,7 +204,7 @@ function renderWorld(){let {w,h,dpr}=screenSize;ctx.setTransform(dpr,0,0,dpr,0,0
  if(started){const near=nearbyBuilding(city,player.x,player.y,120);if(near){ctx.textAlign='center';ctx.font='bold 16px sans-serif';ctx.fillStyle='#f5f4f1';ctx.fillText('E · '+near.name,near.x,near.y+near.h*.67)}}
  ctx.restore();
  // Slight unified atmosphere; no synthetic dark blocks from misplaced CAPX layers.
- const g=ctx.createLinearGradient(0,0,0,h);g.addColorStop(0,'rgba(7,9,15,.07)');g.addColorStop(1,'rgba(4,5,12,.12)');ctx.fillStyle=g;ctx.fillRect(0,0,w,h);
+ ctx.fillStyle='rgba(4,5,12,.065)';ctx.fillRect(0,0,w,h);
  if(started&&frame%8===0)drawMinimap();
 }
 function drawMinimap(){const w=mini.width,h=mini.height;mc.clearRect(0,0,w,h);mc.fillStyle='#282d32';mc.fillRect(0,0,w,h);const range=850,s=w/(range*2);const pc=player;mc.save();mc.translate(w/2-pc.x*s,h/2-pc.y*s);mc.scale(s,s);
@@ -193,7 +229,11 @@ canvas.addEventListener('contextlost',e=>{e.preventDefault();showRenderError('O 
 canvas.addEventListener('contextrestored',()=>{patterns.clear();resize();document.getElementById('minirp-debug-error')?.remove();lastRenderError=''});
 function animate(t){
  requestAnimationFrame(animate);
- const dt=Math.min((t-last)/1000||0,.04);last=t;frame++;
+ // 30 FPS em telas de toque, 45 FPS no PC, para diminuir calor e uso de CPU/GPU.
+ const maxFPS=(window.innerWidth<=850||matchMedia('(pointer: coarse)').matches)?30:45;
+ if(lastPaint && t-lastPaint<1000/maxFPS-1.2)return;
+ const dt=Math.min(lastPaint?(t-lastPaint)/1000:0,.08);
+ lastPaint=t;frame++;
  try{update(dt);if(city)renderWorld()}catch(e){showRenderError(e)}
 }
 async function boot(){try{
