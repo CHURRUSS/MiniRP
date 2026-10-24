@@ -3,13 +3,27 @@
    posição de mapa, waypoint ou collision-polygon do Construct 2 foi reutilizado. */
 import {CELL,STREET,WORLD_SIZE,GRID,buildCity,collide,nearbyBuilding,zoneAt} from './world.js';
 const $=s=>document.querySelector(s);
-const canvas=$('#stage'),ctx=canvas.getContext('2d',{alpha:false,desynchronized:true});
+// Canvas 2D sincronizado: evita quadros invisíveis em alguns navegadores/GPUs.
+const canvas=$('#stage'),ctx=canvas.getContext('2d',{alpha:false});
 const mini=$('#minimap'),mc=mini.getContext('2d');
 const clamp=(n,a,b)=>Math.min(b,Math.max(a,n));
 const SAVE_KEY='minirp-novomotor-v1';
 const LOADER=['assets/asphalt.webp','assets/pavement.webp','assets/grass.webp','assets/concrete.webp','assets/stone.webp','assets/actors/NPC1_Parado_S_0.webp','assets/buildings/07.webp','assets/trees/00.webp'];
 const imageMap=new Map();
-function image(path){if(!path)return null;let im=imageMap.get(path);if(!im){im=new Image();im.decoding='async';im.src=path;imageMap.set(path,im)}return im.complete&&im.naturalWidth>0?im:null}
+// Algumas animações do GitHub ficaram em assets/NPC*.webp, fora de actors/.
+// A correção procura o caminho alternativo sem exigir reenvio das imagens.
+function image(path){
+ if(!path)return null;
+ let im=imageMap.get(path);
+ if(!im){
+  im=new Image();im.decoding='async';
+  if(/^assets\/actors\/NPC[2-4]_/.test(path)){
+   im.onerror=()=>{im.onerror=null;im.src=path.replace('assets/actors/','assets/')};
+  }
+  im.src=path;imageMap.set(path,im);
+ }
+ return im.complete&&im.naturalWidth>0?im:null;
+}
 async function loadImage(path){return new Promise((resolve,reject)=>{const im=new Image();im.onload=()=>{imageMap.set(path,im);resolve(im)};im.onerror=()=>reject(Error('Não foi possível abrir: '+path));im.src=path})}
 const types=['NPC1','NPC2','NPC3','NPC4'];
 let city=null,sizes={},screen='boot',started=false,paused=false,chosenAvatar='NPC1';
@@ -34,7 +48,7 @@ function initializeUI(){
  $('#continue-game').disabled=!loadSave();
  $('#back').onclick=()=>showScreen('menu');
  const avatarWrap=$('#avatars');avatarWrap.replaceChildren();
- for(const type of types){const b=document.createElement('button');b.type='button';b.className='avatar '+(type===chosenAvatar?'selected':'');b.setAttribute('aria-label','Selecionar '+type);const im=document.createElement('img');im.src=`assets/actors/${type}_Parado_S_0.webp`;im.alt=type;const label=document.createElement('span');label.textContent='Estilo '+type.slice(3);b.append(im,label);b.onclick=()=>{chosenAvatar=type;[...avatarWrap.children].forEach(x=>x.classList.toggle('selected',x===b))};avatarWrap.append(b)}
+ for(const type of types){const b=document.createElement('button');b.type='button';b.className='avatar '+(type===chosenAvatar?'selected':'');b.setAttribute('aria-label','Selecionar '+type);const im=document.createElement('img');im.src=`assets/actors/${type}_Parado_S_0.webp`;if(type!=='NPC1')im.onerror=()=>{im.onerror=null;im.src=`assets/${type}_Parado_S_0.webp`};im.alt=type;const label=document.createElement('span');label.textContent='Estilo '+type.slice(3);b.append(im,label);b.onclick=()=>{chosenAvatar=type;[...avatarWrap.children].forEach(x=>x.classList.toggle('selected',x===b))};avatarWrap.append(b)}
  $('#create-form').onsubmit=e=>{e.preventDefault();begin(null)};
  $('#pause').onclick=()=>togglePause();$('#resume').onclick=()=>togglePause(false);$('#save').onclick=()=>saveGame();$('#home').onclick=()=>{saveGame(true);paused=false;started=false;showScreen('menu')};
  $('#zoom-in').onclick=()=>camera.scale=clamp(camera.scale+.16,.72,2.0);
@@ -163,7 +177,25 @@ function drawMinimap(){const w=mini.width,h=mini.height;mc.clearRect(0,0,w,h);mc
  mc.restore();mc.fillStyle='#fff';mc.beginPath();mc.arc(w/2,h/2,6,0,Math.PI*2);mc.fill();mc.strokeStyle='#fa595c';mc.lineWidth=3;mc.stroke();
  mc.strokeStyle='#a5bac5';mc.lineWidth=2;mc.strokeRect(1,1,w-2,h-2);
 }
-function animate(t){requestAnimationFrame(animate);const dt=Math.min((t-last)/1000||0,.04);last=t;frame++;update(dt);if(city)renderWorld()}
+let lastRenderError='';
+function showRenderError(e){
+ const message=String(e?.message||e||'Erro desconhecido');
+ if(message===lastRenderError)return;
+ lastRenderError=message;
+ console.error('MiniRP: erro no desenho do jogo',e);
+ const el=document.createElement('div');el.id='minirp-debug-error';
+ el.setAttribute('role','alert');
+ el.style.cssText='position:fixed;top:46%;left:50%;transform:translate(-50%,-50%);z-index:28;max-width:min(540px,90vw);padding:14px 18px;color:#fff;background:#3d1422eF;border:1px solid #ff6b74;border-radius:12px;font:13px/1.5 sans-serif;box-shadow:0 8px 32px #000a;text-align:center';
+ el.textContent='Falha ao desenhar MiniRP: '+message;
+ document.getElementById('minirp-debug-error')?.remove();document.body.appendChild(el);
+}
+canvas.addEventListener('contextlost',e=>{e.preventDefault();showRenderError('O navegador perdeu o contexto gráfico do Canvas. Recarregue a página.')});
+canvas.addEventListener('contextrestored',()=>{patterns.clear();resize();document.getElementById('minirp-debug-error')?.remove();lastRenderError=''});
+function animate(t){
+ requestAnimationFrame(animate);
+ const dt=Math.min((t-last)/1000||0,.04);last=t;frame++;
+ try{update(dt);if(city)renderWorld()}catch(e){showRenderError(e)}
+}
 async function boot(){try{
  resize();const response=await fetch('asset-sizes.json');if(!response.ok)throw Error('Lista de imagens ausente.');sizes=await response.json();city=buildCity(sizes);
  for(let i=0;i<LOADER.length;i++){await loadImage(LOADER[i]);$('#progress').style.width=Math.round((i+1)/LOADER.length*100)+'%';$('#progress-text').textContent=`Carregando recursos ${i+1}/${LOADER.length}`}
