@@ -1,7 +1,7 @@
 /* MiniRP 2.0 — motor escrito integralmente do zero em JavaScript.
    O CAPX é usado APENAS como origem dos sprites e tiles. Nenhum evento,
    posição de mapa, waypoint ou collision-polygon do Construct 2 foi reutilizado. */
-import {CELL,STREET,WORLD_SIZE,GRID,X_ROADS,Y_ROADS,buildCity,collide,nearbyBuilding,zoneAt} from './world.js';
+import {CELL,STREET,WORLD_SIZE,GRID,X_ROADS,Y_ROADS,buildCity,collide,nearbyBuilding,zoneAt,updateTraffic} from './world.js';
 const $=s=>document.querySelector(s);
 // Canvas 2D sincronizado: evita quadros invisíveis em alguns navegadores/GPUs.
 const canvas=$('#stage'),ctx=canvas.getContext('2d',{alpha:false});
@@ -83,9 +83,7 @@ function update(dt){if(screen!=='game'||paused)return;const p=player;
  if(p.moving&&!sprint)p.energy=clamp(p.energy+dt*3,0,100);
  p.time=(p.time+dt*.85)%1440;
  for(const n of city.npcs){let target=n.route[n.point],dx=target[0]-n.x,dy=target[1]-n.y,dist=Math.hypot(dx,dy);if(dist<3){n.point=(n.point+1)%n.route.length;continue}const step=Math.min(n.speed*dt,dist);n.x+=dx/dist*step;n.y+=dy/dist*step;n.dir=Math.abs(dx)>Math.abs(dy)?dx>0?'D':'A':dy>0?'S':'W';n.anim+=dt*7}
- for(const car of city.cars){car.braking=false;for(const other of city.cars){if(car===other||car.axis!==other.axis||Math.abs(car.lane-other.lane)>8||car.direction!==other.direction)continue;let ahead=(other.position-car.position)*car.direction;if(ahead>0&&ahead<145){car.braking=true;break}}
-  if(!car.braking){car.position+=car.speed*dt*car.direction;if(car.position>WORLD_SIZE-80)car.position=80;if(car.position<80)car.position=WORLD_SIZE-80}
- }
+ updateTraffic(city,dt);
  camera.x+=(p.x-camera.x)*Math.min(1,dt*6);camera.y+=(p.y-camera.y)*Math.min(1,dt*6);
  const eText=p.energy.toFixed(0)+'%',cashText='R$ '+p.cash.toLocaleString('pt-BR'),timeText=String(Math.floor(p.time/60)).padStart(2,'0')+':'+String(Math.floor(p.time%60)).padStart(2,'0'),zoneText=zoneAt(p.x,p.y).toUpperCase();
  if($('#energy').style.width!==eText)$('#energy').style.width=eText;
@@ -103,38 +101,42 @@ function paintPattern(g,path,x,y,w,h,fallback){
  g.fillStyle=im?g.createPattern(im,'repeat'):fallback;
  g.fillRect(x,y,w,h);
 }
-function paintCrosswalk(g,x,y){
- // As marcações anteriores foram desenhadas a 90 graus do visual desejado.
- // Invertendo a orientação: horizontal nas travessias laterais, vertical nas superior/inferior.
- g.fillStyle='rgba(245,244,232,.91)';
- const offset=STREET/2+90;
- for(let k=-3;k<=3;k++){
-  const d=k*16;
-  // Via horizontal: listras deitadas, distribuídas ao longo da travessia.
-  g.fillRect(x+offset-55,y+d-5,110,10);
-  g.fillRect(x-offset-55,y+d-5,110,10);
-  // Via vertical: listras em pé, distribuídas ao longo da travessia.
-  g.fillRect(x+d-5,y+offset-55,10,110);
-  g.fillRect(x+d-5,y-offset-55,10,110);
- }
+// Marcas de pedestre: cada faixa alcança o meio-fio de um lado ao outro.
+// As listras ficam perpendiculares ao deslocamento do pedestre,
+// não são tiras isoladas no meio da pista.
+function crossVerticalRoad(g,x,y){
+ g.fillStyle='rgba(245,244,232,.94)';
+ for(let k=-2;k<=2;k++)g.fillRect(x-STREET/2-2,y+k*15-6,STREET+4,11);
+}
+function crossHorizontalRoad(g,x,y){
+ g.fillStyle='rgba(245,244,232,.94)';
+ for(let k=-2;k<=2;k++)g.fillRect(x+k*15-6,y-STREET/2-2,11,STREET+4);
 }
 function buildTerrainChunk(block){
  const tile=document.createElement('canvas');tile.width=block.w;tile.height=block.h;
  const g=tile.getContext('2d',{alpha:false});
  g.translate(-block.x,-block.y);
- const {x,y,w,h}=block;
+ const {x,y,w,h,borders,land}=block;
  paintPattern(g,'assets/asphalt.webp',x,y,w,h,'#303039');
- const insideX=x+STREET/2,insideY=y+STREET/2,iw=w-STREET,ih=h-STREET;
- paintPattern(g,'assets/pavement.webp',insideX,insideY,iw,ih,'#777571');
- g.lineWidth=7;g.strokeStyle='#c9c8c4';g.strokeRect(insideX+2,insideY+2,iw-4,ih-4);
- g.lineWidth=3;g.strokeStyle='#535450';g.strokeRect(insideX+9,insideY+9,iw-18,ih-18);
- const inside=insideX+39,iy=insideY+39,pw=iw-78,ph=ih-78;
+ // Sem trecho de rua, o solo se une à parcela adjacente: funciona para formatos em L.
+ paintPattern(g,'assets/pavement.webp',land.x,land.y,land.w,land.h,'#777571');
+ g.lineWidth=6;g.strokeStyle='#c9c8c4';
+ g.beginPath();
+ if(borders.top){g.moveTo(land.x,land.y+3);g.lineTo(land.x+land.w,land.y+3)}
+ if(borders.bottom){g.moveTo(land.x,land.y+land.h-3);g.lineTo(land.x+land.w,land.y+land.h-3)}
+ if(borders.left){g.moveTo(land.x+3,land.y);g.lineTo(land.x+3,land.y+land.h)}
+ if(borders.right){g.moveTo(land.x+land.w-3,land.y);g.lineTo(land.x+land.w-3,land.y+land.h)}
+ g.stroke();
+ // Interiores de cada sub-região têm lotes diferentes; os corredores entre elas
+ // continuam parte do mesmo quarteirão, sem uma rua fantasma.
+ const inside=x+STREET/2+39,iy=y+STREET/2+39;
+ const pw=w-STREET-78,ph=h-STREET-78;
  if(block.kind==='park'){
   paintPattern(g,'assets/grass.webp',inside,iy,pw,ph,'#377d3c');
-  const centerX=x+w/2,centerY=y+h/2;
-  g.fillStyle='#d3c7b0';g.fillRect(inside,centerY-16,pw,32);g.fillRect(centerX-16,iy,32,ph);
+  const cx=x+w/2,cy=y+h/2;
+  g.fillStyle='#d3c7b0';g.fillRect(inside,cy-16,pw,32);g.fillRect(cx-16,iy,32,ph);
   g.strokeStyle='#eee2ca';g.lineWidth=2;g.strokeRect(inside,iy,pw,ph);
-  g.fillStyle='#65a5a9';g.beginPath();g.arc(centerX,centerY,24,0,Math.PI*2);g.fill();g.strokeStyle='#e4dbc6';g.lineWidth=5;g.stroke();
+  g.fillStyle='#65a5a9';g.beginPath();g.arc(cx,cy,24,0,Math.PI*2);g.fill();g.strokeStyle='#e4dbc6';g.lineWidth=5;g.stroke();
  }else if(block.kind==='plaza'){
   paintPattern(g,'assets/stone.webp',inside,iy,pw,ph,'#bbb1a5');
   g.fillStyle='#a3bdb0';const sq=105;
@@ -142,19 +144,26 @@ function buildTerrainChunk(block){
   g.fillStyle='#628caa';g.beginPath();g.arc(x+w/2,y+h/2,53,0,Math.PI*2);g.fill();g.strokeStyle='#eff1e7';g.lineWidth=8;g.stroke();
  }else{
   paintPattern(g,block.kind==='industrial'?'assets/concrete.webp':'assets/grass.webp',inside,iy,pw,ph,block.kind==='industrial'?'#aaa5a0':'#397a43');
-  // Quadras agora contêm lotes de larguras e profundidades variadas, inclusive alguns vazios.
   for(const lot of block.lots){
    paintPattern(g,lot.material==='stone'?'assets/stone.webp':lot.material==='concrete'?'assets/concrete.webp':'assets/pavement.webp',lot.x,lot.y,lot.w,lot.h,'#99978e');
    g.strokeStyle='rgba(25,29,26,.32)';g.lineWidth=2;g.strokeRect(lot.x,lot.y,lot.w,lot.h);
    if(lot.empty){g.fillStyle='rgba(55,96,62,.28)';g.fillRect(lot.x+7,lot.y+7,lot.w-14,lot.h-14)}
   }
  }
- // Marcação central das ruas na borda esquerda e superior de cada bloco.
- g.strokeStyle='#cfcac1';g.lineWidth=3;g.setLineDash([34,39]);
- g.beginPath();g.moveTo(x,y);g.lineTo(x,y+h);g.stroke();
- g.beginPath();g.moveTo(x,y);g.lineTo(x+w,y);g.stroke();g.setLineDash([]);
- // Cada canto é um cruzamento; a pintura fica clipada automaticamente no setor.
- for(const vx of [x,x+w])for(const vy of [y,y+h])paintCrosswalk(g,vx,vy);
+ // Centro da pista tracejado SOMENTE onde há segmento rodoviário real.
+ g.strokeStyle='#cfcac1';g.lineWidth=3;g.setLineDash([34,39]);g.beginPath();
+ if(borders.left){g.moveTo(x,y);g.lineTo(x,y+h)}
+ if(borders.right){g.moveTo(x+w,y);g.lineTo(x+w,y+h)}
+ if(borders.top){g.moveTo(x,y);g.lineTo(x+w,y)}
+ if(borders.bottom){g.moveTo(x,y+h);g.lineTo(x+w,y+h)}
+ g.stroke();g.setLineDash([]);
+ // Cada travessia nasce no meio-fio de um lado e acaba no do lado oposto.
+ // Desenho fica dividido entre os dois setores vizinhos pelo clipping do canvas.
+ const d=STREET/2+49;
+ if(borders.left){crossVerticalRoad(g,x,y+d);crossVerticalRoad(g,x,y+h-d)}
+ if(borders.right){crossVerticalRoad(g,x+w,y+d);crossVerticalRoad(g,x+w,y+h-d)}
+ if(borders.top){crossHorizontalRoad(g,x+d,y);crossHorizontalRoad(g,x+w-d,y)}
+ if(borders.bottom){crossHorizontalRoad(g,x+d,y+h);crossHorizontalRoad(g,x+w-d,y+h)}
  return tile;
 }
 function getTerrainChunk(block){
@@ -185,7 +194,7 @@ function renderWorld(){let {w,h,dpr}=screenSize;ctx.setTransform(dpr,0,0,dpr,0,0
  for(const t of city.trees)if(inView(t.x,t.y,150))layers.push({y:t.y,kind:'tree',v:t});
  for(const b of city.props)if(inView(b.x,b.y,130))layers.push({y:b.y,kind:'prop',v:b});
  if(started){for(const n of city.npcs)if(inView(n.x,n.y,100))layers.push({y:n.y,kind:'npc',v:n});}
- if(started){for(const c of city.cars){const x=c.axis==='x'?c.position:c.lane,y=c.axis==='x'?c.lane:c.position;if(inView(x,y,140))layers.push({y,kind:'car',v:c,x})}}
+ if(started){for(const c of city.cars){if(inView(c.x,c.y,140))layers.push({y:c.y,kind:'car',v:c})}}
  if(started)layers.push({y:player.y,kind:'player',v:player});
  layers.sort((a,b)=>a.y-b.y);
  for(const layer of layers){const o=layer.v;
@@ -198,9 +207,8 @@ function renderWorld(){let {w,h,dpr}=screenSize;ctx.setTransform(dpr,0,0,dpr,0,0
    const im=actorImage(o);
    if(im){const hh=layer.kind==='player'?45:36,ww=layer.kind==='player'?28:24;ctx.drawImage(im,o.x-ww/2,o.y-hh/2,ww,hh)}
   }else if(layer.kind==='car'){
-   const x=o.axis==='x'?o.position:o.lane,y=o.axis==='x'?o.lane:o.position;
    const im=image(`assets/cars/${String(o.frame).padStart(2,'0')}.webp`);
-   if(im){ctx.save();ctx.translate(x,y);if(o.axis==='y')ctx.rotate(Math.PI/2*o.direction);else if(o.direction<0)ctx.rotate(Math.PI);ctx.drawImage(im,-69,-29,138,58);ctx.restore()}
+   if(im){ctx.save();ctx.translate(o.x,o.y);ctx.rotate(o.angle);ctx.drawImage(im,-69,-29,138,58);ctx.restore()}
   }
  }
  if(started){const near=nearbyBuilding(city,player.x,player.y,120);if(near){ctx.textAlign='center';ctx.font='bold 16px sans-serif';ctx.fillStyle='#f5f4f1';ctx.fillText('E · '+near.name,near.x,near.y+near.h*.67)}}
@@ -210,7 +218,7 @@ function renderWorld(){let {w,h,dpr}=screenSize;ctx.setTransform(dpr,0,0,dpr,0,0
  if(started&&frame%8===0)drawMinimap();
 }
 function drawMinimap(){const w=mini.width,h=mini.height;mc.clearRect(0,0,w,h);mc.fillStyle='#282d32';mc.fillRect(0,0,w,h);const range=850,s=w/(range*2);const pc=player;mc.save();mc.translate(w/2-pc.x*s,h/2-pc.y*s);mc.scale(s,s);
- for(let b of city.blocks){mc.fillStyle=b.kind==='park'?'#4c9360':b.kind==='plaza'?'#9eaba4':b.kind==='commercial'?'#83909b':b.kind==='industrial'?'#69706a':'#6b876e';mc.fillRect(b.x+STREET/2,b.y+STREET/2,b.w-STREET,b.h-STREET)}
+ for(let b of city.blocks){mc.fillStyle=b.kind==='park'?'#4c9360':b.kind==='plaza'?'#9eaba4':b.kind==='commercial'?'#83909b':b.kind==='industrial'?'#69706a':'#6b876e';mc.fillRect(b.land.x,b.land.y,b.land.w,b.land.h)}
  mc.fillStyle='#27373a';for(let b of city.buildings)mc.fillRect(b.x-b.w*.4,b.y-b.h*.4,b.w*.8,b.h*.8);
  mc.restore();mc.fillStyle='#fff';mc.beginPath();mc.arc(w/2,h/2,6,0,Math.PI*2);mc.fill();mc.strokeStyle='#fa595c';mc.lineWidth=3;mc.stroke();
  mc.strokeStyle='#a5bac5';mc.lineWidth=2;mc.strokeRect(1,1,w-2,h-2);
