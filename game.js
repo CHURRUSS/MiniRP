@@ -1,7 +1,7 @@
 /* MiniRP 2.0 — motor escrito integralmente do zero em JavaScript.
    O CAPX é usado APENAS como origem dos sprites e tiles. Nenhum evento,
    posição de mapa, waypoint ou collision-polygon do Construct 2 foi reutilizado. */
-import {CELL,STREET,WORLD_SIZE,GRID,buildCity,collide,nearbyBuilding,zoneAt} from './world.js';
+import {CELL,STREET,WORLD_SIZE,GRID,X_ROADS,Y_ROADS,buildCity,collide,nearbyBuilding,zoneAt} from './world.js';
 const $=s=>document.querySelector(s);
 // Canvas 2D sincronizado: evita quadros invisíveis em alguns navegadores/GPUs.
 const canvas=$('#stage'),ctx=canvas.getContext('2d',{alpha:false});
@@ -41,6 +41,7 @@ function loadSave(){try{const v=JSON.parse(localStorage.getItem(SAVE_KEY)||'null
 function begin(saved){if(saved){player={...player,...saved};}else{
   player={...player,...city.spawn,name:$('#create [name="name"]').value.trim()||'Dante',city:$('#create [name="city"]').value.trim()||'MiniRP',avatar:chosenAvatar,energy:100,cash:500,time:12*60};
  }player.x=clamp(player.x,100,WORLD_SIZE-100);player.y=clamp(player.y,100,WORLD_SIZE-100);
+ if(collide(city,player.x,player.y,15)){player.x=city.spawn.x;player.y=city.spawn.y;}
  started=true;paused=false;camera={x:player.x,y:player.y,scale:window.innerWidth<700?1.28:1.32};$('#city-label').textContent=player.city.toUpperCase();showScreen('game');$('#pause-dialog').classList.add('hidden');saveGame(true)}
 function initializeUI(){
  $('#new-game').onclick=()=>{showScreen('create');};
@@ -103,55 +104,57 @@ function paintPattern(g,path,x,y,w,h,fallback){
  g.fillRect(x,y,w,h);
 }
 function paintCrosswalk(g,x,y){
- // Travessias em torno de cada cruzamento, com marcas na orientação da via.
- // Faixas em zebra, orientadas conforme o sentido real de cada via.
- g.fillStyle='rgba(245,244,232,.92)';
- const offset=STREET/2+91;
+ // As marcações anteriores foram desenhadas a 90 graus do visual desejado.
+ // Invertendo a orientação: horizontal nas travessias laterais, vertical nas superior/inferior.
+ g.fillStyle='rgba(245,244,232,.91)';
+ const offset=STREET/2+90;
  for(let k=-3;k<=3;k++){
-  const d=k*17;
-  g.fillRect(x+offset+d,y-55,10,110);
-  g.fillRect(x-offset+d,y-55,10,110);
-  g.fillRect(x-55,y+offset+d,110,10);
-  g.fillRect(x-55,y-offset+d,110,10);
+  const d=k*16;
+  // Via horizontal: listras deitadas, distribuídas ao longo da travessia.
+  g.fillRect(x+offset-55,y+d-5,110,10);
+  g.fillRect(x-offset-55,y+d-5,110,10);
+  // Via vertical: listras em pé, distribuídas ao longo da travessia.
+  g.fillRect(x+d-5,y+offset-55,10,110);
+  g.fillRect(x+d-5,y-offset-55,10,110);
  }
 }
 function buildTerrainChunk(block){
- const tile=document.createElement('canvas');tile.width=tile.height=CELL;
+ const tile=document.createElement('canvas');tile.width=block.w;tile.height=block.h;
  const g=tile.getContext('2d',{alpha:false});
- // A transformação mantém as texturas alinhadas entre os setores.
  g.translate(-block.x,-block.y);
- const x=block.x,y=block.y;
- paintPattern(g,'assets/asphalt.webp',x,y,CELL,CELL,'#303039');
- const insideX=x+STREET/2,insideY=y+STREET/2,s=CELL-STREET;
- paintPattern(g,'assets/pavement.webp',insideX,insideY,s,s,'#777571');
- g.lineWidth=7;g.strokeStyle='#c9c8c4';g.strokeRect(insideX+2,insideY+2,s-4,s-4);
- g.lineWidth=3;g.strokeStyle='#535450';g.strokeRect(insideX+9,insideY+9,s-18,s-18);
- const inside=insideX+40,iy=insideY+40,size=s-80;
+ const {x,y,w,h}=block;
+ paintPattern(g,'assets/asphalt.webp',x,y,w,h,'#303039');
+ const insideX=x+STREET/2,insideY=y+STREET/2,iw=w-STREET,ih=h-STREET;
+ paintPattern(g,'assets/pavement.webp',insideX,insideY,iw,ih,'#777571');
+ g.lineWidth=7;g.strokeStyle='#c9c8c4';g.strokeRect(insideX+2,insideY+2,iw-4,ih-4);
+ g.lineWidth=3;g.strokeStyle='#535450';g.strokeRect(insideX+9,insideY+9,iw-18,ih-18);
+ const inside=insideX+39,iy=insideY+39,pw=iw-78,ph=ih-78;
  if(block.kind==='park'){
-  paintPattern(g,'assets/grass.webp',inside,iy,size,size,'#377d3c');
-  g.fillStyle='#d3c7b0';g.fillRect(inside,y+CELL/2-19,size,38);g.fillRect(x+CELL/2-19,iy,38,size);
-  g.strokeStyle='#eee2ca';g.lineWidth=2;g.strokeRect(inside,iy,size,size);
-  g.fillStyle='#65a5a9';g.beginPath();g.arc(x+CELL/2,y+CELL/2,27,0,Math.PI*2);g.fill();g.strokeStyle='#e4dbc6';g.lineWidth=6;g.stroke();
+  paintPattern(g,'assets/grass.webp',inside,iy,pw,ph,'#377d3c');
+  const centerX=x+w/2,centerY=y+h/2;
+  g.fillStyle='#d3c7b0';g.fillRect(inside,centerY-16,pw,32);g.fillRect(centerX-16,iy,32,ph);
+  g.strokeStyle='#eee2ca';g.lineWidth=2;g.strokeRect(inside,iy,pw,ph);
+  g.fillStyle='#65a5a9';g.beginPath();g.arc(centerX,centerY,24,0,Math.PI*2);g.fill();g.strokeStyle='#e4dbc6';g.lineWidth=5;g.stroke();
  }else if(block.kind==='plaza'){
-  paintPattern(g,'assets/stone.webp',inside,iy,size,size,'#bbb1a5');
-  g.fillStyle='#a3bdb0';g.fillRect(inside+34,iy+34,145,145);g.fillRect(inside+size-179,iy+34,145,145);
-  g.fillRect(inside+34,iy+size-179,145,145);g.fillRect(inside+size-179,iy+size-179,145,145);
-  g.fillStyle='#628caa';g.beginPath();g.arc(x+CELL/2,y+CELL/2,60,0,Math.PI*2);g.fill();g.strokeStyle='#eff1e7';g.lineWidth=11;g.stroke();
+  paintPattern(g,'assets/stone.webp',inside,iy,pw,ph,'#bbb1a5');
+  g.fillStyle='#a3bdb0';const sq=105;
+  for(const xx of [inside+28,inside+pw-28-sq])for(const yy of [iy+28,iy+ph-28-sq])g.fillRect(xx,yy,sq,sq);
+  g.fillStyle='#628caa';g.beginPath();g.arc(x+w/2,y+h/2,53,0,Math.PI*2);g.fill();g.strokeStyle='#eff1e7';g.lineWidth=8;g.stroke();
  }else{
-  paintPattern(g,block.kind==='industrial'?'assets/concrete.webp':'assets/grass.webp',inside,iy,size,size,block.kind==='industrial'?'#aaa5a0':'#397a43');
-  for(let gx=0;gx<2;gx++)for(let gy=0;gy<2;gy++){
-   const xx=x+CELL*(gx?0.695:0.305),yy=y+CELL*(gy?0.696:0.305),lotw=266;
-   paintPattern(g,block.kind==='industrial'?'assets/concrete.webp':'assets/pavement.webp',xx-lotw/2,yy-lotw/2,lotw,lotw,block.kind==='industrial'?'#999':'#a49e93');
-   g.strokeStyle='rgba(22,26,28,.23)';g.lineWidth=3;g.strokeRect(xx-lotw/2,yy-lotw/2,lotw,lotw);
-   g.fillStyle='#c2c0b9';g.fillRect(xx-15,yy+lotw*.41,30,40);
+  paintPattern(g,block.kind==='industrial'?'assets/concrete.webp':'assets/grass.webp',inside,iy,pw,ph,block.kind==='industrial'?'#aaa5a0':'#397a43');
+  // Quadras agora contêm lotes de larguras e profundidades variadas, inclusive alguns vazios.
+  for(const lot of block.lots){
+   paintPattern(g,lot.material==='stone'?'assets/stone.webp':lot.material==='concrete'?'assets/concrete.webp':'assets/pavement.webp',lot.x,lot.y,lot.w,lot.h,'#99978e');
+   g.strokeStyle='rgba(25,29,26,.32)';g.lineWidth=2;g.strokeRect(lot.x,lot.y,lot.w,lot.h);
+   if(lot.empty){g.fillStyle='rgba(55,96,62,.28)';g.fillRect(lot.x+7,lot.y+7,lot.w-14,lot.h-14)}
   }
  }
- g.strokeStyle='#cfcac1';g.lineWidth=3;g.setLineDash([37,36]);
- g.beginPath();g.moveTo(x,y);g.lineTo(x,y+CELL);g.stroke();
- g.beginPath();g.moveTo(x,y);g.lineTo(x+CELL,y);g.stroke();
- g.setLineDash([]);
- // 4 vértices para manter marcas inteiras apesar dos limites entre chunks.
- for(let a=0;a<=1;a++)for(let b=0;b<=1;b++)paintCrosswalk(g,x+a*CELL,y+b*CELL);
+ // Marcação central das ruas na borda esquerda e superior de cada bloco.
+ g.strokeStyle='#cfcac1';g.lineWidth=3;g.setLineDash([34,39]);
+ g.beginPath();g.moveTo(x,y);g.lineTo(x,y+h);g.stroke();
+ g.beginPath();g.moveTo(x,y);g.lineTo(x+w,y);g.stroke();g.setLineDash([]);
+ // Cada canto é um cruzamento; a pintura fica clipada automaticamente no setor.
+ for(const vx of [x,x+w])for(const vy of [y,y+h])paintCrosswalk(g,vx,vy);
  return tile;
 }
 function getTerrainChunk(block){
@@ -160,16 +163,15 @@ function getTerrainChunk(block){
   const c=terrainCache.get(key);terrainCache.delete(key);terrainCache.set(key,c);return c;
  }
  const c=buildTerrainChunk(block);terrainCache.set(key,c);
- const limit=window.innerWidth<=850?6:9;
+ const limit=window.innerWidth<=850?5:8;
  while(terrainCache.size>limit){const oldest=terrainCache.keys().next().value;terrainCache.delete(oldest)}
  return c;
 }
 function fillGround(){
- // Somente quarteirões visíveis são desenhados. Nenhum piso recalculado a cada frame.
  const halfW=screenSize.w/(camera.scale*2),halfH=screenSize.h/(camera.scale*2);
  const x0=camera.x-halfW,y0=camera.y-halfH,x1=camera.x+halfW,y1=camera.y+halfH;
  for(const block of city.blocks){
-  if(block.x>x1||block.x+CELL<x0||block.y>y1||block.y+CELL<y0)continue;
+  if(block.x>x1||block.x+block.w<x0||block.y>y1||block.y+block.h<y0)continue;
   ctx.drawImage(getTerrainChunk(block),block.x,block.y);
  }
 }
@@ -208,7 +210,7 @@ function renderWorld(){let {w,h,dpr}=screenSize;ctx.setTransform(dpr,0,0,dpr,0,0
  if(started&&frame%8===0)drawMinimap();
 }
 function drawMinimap(){const w=mini.width,h=mini.height;mc.clearRect(0,0,w,h);mc.fillStyle='#282d32';mc.fillRect(0,0,w,h);const range=850,s=w/(range*2);const pc=player;mc.save();mc.translate(w/2-pc.x*s,h/2-pc.y*s);mc.scale(s,s);
- for(let b of city.blocks){mc.fillStyle=b.kind==='park'?'#4c9360':b.kind==='plaza'?'#9eaba4':b.kind==='commercial'?'#83909b':b.kind==='industrial'?'#69706a':'#6b876e';mc.fillRect(b.x+STREET/2,b.y+STREET/2,CELL-STREET,CELL-STREET)}
+ for(let b of city.blocks){mc.fillStyle=b.kind==='park'?'#4c9360':b.kind==='plaza'?'#9eaba4':b.kind==='commercial'?'#83909b':b.kind==='industrial'?'#69706a':'#6b876e';mc.fillRect(b.x+STREET/2,b.y+STREET/2,b.w-STREET,b.h-STREET)}
  mc.fillStyle='#27373a';for(let b of city.buildings)mc.fillRect(b.x-b.w*.4,b.y-b.h*.4,b.w*.8,b.h*.8);
  mc.restore();mc.fillStyle='#fff';mc.beginPath();mc.arc(w/2,h/2,6,0,Math.PI*2);mc.fill();mc.strokeStyle='#fa595c';mc.lineWidth=3;mc.stroke();
  mc.strokeStyle='#a5bac5';mc.lineWidth=2;mc.strokeRect(1,1,w-2,h-2);
